@@ -164,9 +164,11 @@ public class StompChannel {
                         connectionMonitor.wait();
                     }
                 } else {
-                    long now = System.currentTimeMillis();
-                    long target = now + timeoutMs;
-                    while (!(started.get() && connectionThrowable == null) && System.currentTimeMillis() < target) {
+                    long startTime = System.currentTimeMillis();
+                    long target = startTime + timeoutMs;
+                    long now;
+                    while (!(started.get() && connectionThrowable == null)
+                            && (now = System.currentTimeMillis()) < target) {
                         connectionMonitor.wait(target - now, 0);
                     }
                     if (connectionThrowable != null) {
