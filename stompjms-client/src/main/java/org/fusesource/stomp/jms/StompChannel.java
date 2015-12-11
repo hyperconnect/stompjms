@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -43,7 +44,7 @@ public class StompChannel {
         new StompServerAdaptor()
     };
 
-    static final long TIMEOUT = -1;
+    public static final int INDEFINITE = -1;
     String channelId;
     String userName;
     String password;
@@ -54,8 +55,10 @@ public class StompChannel {
     CallbackConnection connection;
     StompJmsMessageListener listener;
     ExceptionListener exceptionListener;
-    AtomicBoolean started = new AtomicBoolean();
-    AtomicBoolean connected = new AtomicBoolean();
+    final AtomicBoolean started = new AtomicBoolean();
+    volatile Throwable connectionThrowable;
+    final Object connectionMonitor = new Object();
+    final AtomicBoolean connecting = new AtomicBoolean(false);
     AsciiBuffer sessionId;
     AtomicInteger writeBufferRemaining = new AtomicInteger();
     AtomicInteger serverAckSubs = new AtomicInteger();
@@ -82,23 +85,44 @@ public class StompChannel {
         return copy;
     }
 
-    CountDownLatch connectedLatch = new CountDownLatch(1);
+    public void connect(int timeoutMs) throws JMSException {
+        if (this.started.get()) {
+            return;
+        }
 
-    public void connect() throws JMSException {
-        if (this.connected.compareAndSet(false, true)) {
-            try {
-                final Promise<CallbackConnection> future = new Promise<CallbackConnection>();
-                Stomp stomp = new Stomp(brokerURI);
-                stomp.setLogin(userName);
-                stomp.setPasscode(password);
-                stomp.setLocalURI(localURI);
-                stomp.setClientId(clientId);
-                stomp.connectCallback(future);
-                if( omitHost ) {
-                    stomp.setHost(null);
+        try {
+            synchronized (connectionMonitor) {
+                if (this.connecting.compareAndSet(false, true)) {
+                    doConnect();
                 }
 
-                connection = future.await();
+                awaitConnectionResult(timeoutMs);
+            }
+        } catch (Exception e) {
+            notifyConnectionResult(false, e);
+            throw StompJmsExceptionSupport.create(e);
+        }
+    }
+
+    private void doConnect() {
+        Stomp stomp = new Stomp(brokerURI);
+        stomp.setLogin(userName);
+        stomp.setPasscode(password);
+        stomp.setLocalURI(localURI);
+        stomp.setClientId(clientId);
+        if( omitHost ) {
+            stomp.setHost(null);
+        }
+        stomp.connectCallback(new Callback<CallbackConnection>() {
+            @Override
+            public void onFailure(Throwable value) {
+                super.onFailure(value);
+                notifyConnectionResult(false, value);
+            }
+
+            @Override
+            public void onSuccess(CallbackConnection value) {
+                connection = value;
                 writeBufferRemaining.set(connection.transport().getProtocolCodec().getWriteBufferSize());
                 connection.getDispatchQueue().execute(new Task() {
                     public void run() {
@@ -118,7 +142,6 @@ public class StompChannel {
                 if ( sessionId ==null ) {
                     sessionId = new AsciiBuffer("id-"+UUID.randomUUID().toString());
                 }
-                started.set(true);
 
                 String sv = getServerAndVersion();
                 for( StompServerAdaptor adaptor : STOMP_SERVER_ADAPTORS) {
@@ -128,18 +151,41 @@ public class StompChannel {
                     }
                 }
                 assert serverAdaptor!=null;
+                notifyConnectionResult(true, null);
+            }
+        });
+    }
 
-            } catch (Exception e) {
-                connected.set(false);
-                throw StompJmsExceptionSupport.create(e);
-            } finally {
-                connectedLatch.countDown();
+    private void awaitConnectionResult(long timeoutMs) throws InterruptedException, TimeoutException, IOException {
+        synchronized (connectionMonitor) {
+            if (!started.get()) {
+                if (timeoutMs == INDEFINITE) {
+                    while (!started.get() && null != connectionThrowable) {
+                        connectionMonitor.wait();
+                    }
+                } else {
+                    long now = System.currentTimeMillis();
+                    long target = now + timeoutMs;
+                    while (!(started.get() && connectionThrowable == null) && System.currentTimeMillis() < target) {
+                        connectionMonitor.wait(target - now, 0);
+                    }
+                    if (connectionThrowable != null) {
+                        throw new IOException(connectionThrowable);
+                    }
+                    if (!started.get()) {
+                        throw new TimeoutException(String.format("timeout connecting to %s", brokerURI));
+                    }
+                }
             }
         }
-        try {
-            connectedLatch.await();
-        } catch (InterruptedException e) {
-            throw StompJmsExceptionSupport.create(e);
+    }
+
+    private void notifyConnectionResult(boolean connected, Throwable throwable) {
+        synchronized (connectionMonitor) {
+            connecting.set(false);
+            started.set(connected);
+            connectionThrowable = throwable;
+            connectionMonitor.notifyAll();
         }
     }
 
@@ -148,9 +194,8 @@ public class StompChannel {
     }
 
     public void close() throws JMSException {
-        if (connected.compareAndSet(true, false)) {
+        if (started.compareAndSet(true, false)) {
             final CountDownLatch cd = new CountDownLatch(1);
-            started.set(false);
 
             // Request a DISCONNECT so that we can try to flush the socket out.
             connection.getDispatchQueue().execute(new Task(){
