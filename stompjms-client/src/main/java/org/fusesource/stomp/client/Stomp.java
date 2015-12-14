@@ -96,6 +96,7 @@ public class Stomp {
     private String clientId;
     private String version = "1.1";
     private Properties customHeaders;
+    private Transport transport;
 
     ///////////////////////////////////////////////////////////////////
     // Instance methods
@@ -105,7 +106,6 @@ public class Stomp {
         assert cb!=null : "Callback should not be null.";
         try {
             String scheme = remoteURI.getScheme();
-            final Transport transport;
             if( "tcp".equals(scheme) ) {
                 transport = new TcpTransport();
             }  else if( SslTransport.protocol(scheme)!=null ) {
@@ -383,6 +383,12 @@ public class Stomp {
 
     public String getVersion() {
         return version;
+    }
+
+    public void close() {
+        if (transport != null) {
+            transport.stop(NOOP);
+        }
     }
 
 

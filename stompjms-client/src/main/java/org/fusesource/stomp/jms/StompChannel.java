@@ -99,7 +99,11 @@ public class StompChannel {
                     stomp.setHost(null);
                 }
 
-                connection = future.await();
+                connection = future.await(timeoutMs, TimeUnit.MILLISECONDS);
+                if (null == connection) {
+                    stomp.close();
+                    throw StompJmsExceptionSupport.create(new TimeoutException("connection timeout"));
+                }
                 writeBufferRemaining.set(connection.transport().getProtocolCodec().getWriteBufferSize());
                 connection.getDispatchQueue().execute(new Task() {
                     public void run() {
