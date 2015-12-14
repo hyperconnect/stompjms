@@ -343,15 +343,20 @@ public class StompJmsConnection implements Connection, TopicConnection, QueueCon
     }
 
     protected StompChannel getChannel() throws JMSException {
-        StompChannel rc;
-        synchronized (this) {
-            if(channel == null) {
-                channel = createChannel();
+        try {
+            StompChannel rc;
+            synchronized (this) {
+                if(channel == null) {
+                    channel = createChannel();
+                }
+                rc = channel;
             }
-            rc = channel;
+            rc.connect(connectTimeoutMs);
+            return rc;
+        } catch (JMSException e) {
+            channel = null;
+            throw e;
         }
-        rc.connect(connectTimeoutMs);
-        return rc;
     }
 
     protected StompChannel createChannel(StompJmsSession s) throws JMSException {
