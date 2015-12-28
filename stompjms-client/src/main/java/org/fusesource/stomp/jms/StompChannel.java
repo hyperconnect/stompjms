@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -84,7 +85,7 @@ public class StompChannel {
 
     CountDownLatch connectedLatch = new CountDownLatch(1);
 
-    public void connect() throws JMSException {
+    public void connect(long timeoutMs) throws JMSException {
         if (this.connected.compareAndSet(false, true)) {
             try {
                 final Promise<CallbackConnection> future = new Promise<CallbackConnection>();
@@ -98,7 +99,11 @@ public class StompChannel {
                     stomp.setHost(null);
                 }
 
-                connection = future.await();
+                connection = future.await(timeoutMs, TimeUnit.MILLISECONDS);
+                if (null == connection) {
+                    stomp.close();
+                    throw StompJmsExceptionSupport.create(new TimeoutException("connection timeout"));
+                }
                 writeBufferRemaining.set(connection.transport().getProtocolCodec().getWriteBufferSize());
                 connection.getDispatchQueue().execute(new Task() {
                     public void run() {
@@ -137,9 +142,12 @@ public class StompChannel {
             }
         }
         try {
-            connectedLatch.await();
+            connectedLatch.await(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             throw StompJmsExceptionSupport.create(e);
+        }
+        if (!started.get()) {
+            throw StompJmsExceptionSupport.create(new TimeoutException("connection timeout"));
         }
     }
 
